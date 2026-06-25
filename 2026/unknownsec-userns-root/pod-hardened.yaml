@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: userns-demo-hardened
+  labels:
+    app: userns-demo
+    mode: hardened
+spec:
+  hostUsers: false
+  restartPolicy: Never
+  containers:
+    - name: userns-attacker
+      image: alpine:3.20
+      securityContext:
+        runAsUser: 0
+        runAsGroup: 0
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+      command: ["/bin/sh", "-c"]
+      args:
+        - |
+          set -eu
+          echo "[container] id: $(id)"
+          echo "[container] uid_map:"; cat /proc/self/uid_map || true
+          echo "[container] attempting write to /host/proof-from-container.txt"
+          echo "proof: hardened wrote this" >> /host/proof-from-container.txt
+          echo "[container] write attempted (see Tetragon for host UID)"
+          sleep 3600
+      volumeMounts:
+        - name: host-demo
+          mountPath: /host
+          readOnly: false
+  volumes:
+    - name: host-demo
+      hostPath:
+        path: /var/lib/userns-demo
+        type: Directory

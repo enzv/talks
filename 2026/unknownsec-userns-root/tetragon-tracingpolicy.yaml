@@ -1,0 +1,20 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicy
+metadata:
+  name: userns-demo-observe-openat
+spec:
+  podSelector:
+    matchLabels:
+      app: userns-demo
+  tracepoints:
+    - subsystem: syscalls
+      event: sys_enter_openat
+      args:
+        - index: 1
+          type: string
+      selectors:
+        - matchArgs:
+            - index: 1
+              operator: SubString
+              values:
+                - proof-from-container.txt
