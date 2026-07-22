@@ -1,0 +1,17 @@
+FROM docker.io/library/golang:1.24-alpine AS build
+
+WORKDIR /src
+COPY main.go .
+
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /agent-workload-lab \
+    main.go
+
+FROM docker.io/library/alpine:3.22
+
+COPY --from=build /agent-workload-lab /agent-workload-lab
+
+EXPOSE 8080
+ENTRYPOINT ["/agent-workload-lab"]
