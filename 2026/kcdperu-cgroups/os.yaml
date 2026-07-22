@@ -1,0 +1,83 @@
+# Lima template: Ubuntu (GRUB) + K3s
+#
+# This intentionally uses a full Ubuntu cloud image so you have GRUB and can test
+# "edit /etc/default/grub + update-grub + reboot" flows like on typical cloud VMs.
+#
+# Notes:
+# - This template does NOT flip cgroups by itself. It boots using the distro default
+#   cgroup mode (Ubuntu 24.04 defaults to cgroups v2).
+# - If you want to flip cgroups v1 <-> v2 using GRUB, apply `revert-cgroups.yaml`
+#   from inside the cluster (it will reboot the node).
+#
+# Usage:
+#   limactl create --tty=false --name=grubk3s os.yaml
+#   limactl start grubk3s
+#   limactl shell grubk3s -- stat -fc %T /sys/fs/cgroup
+#   limactl shell grubk3s -- sudo kubectl get nodes -o wide
+#
+minimumLimaVersion: 2.0.0
+
+images:
+  - location: "https://cloud-images.ubuntu.com/releases/24.04/release-20240423/ubuntu-24.04-server-cloudimg-amd64.img"
+    arch: "x86_64"
+    digest: "sha256:32a9d30d18803da72f5936cf2b7b9efcb4d0bb63c67933f17e3bdfd1751de3f3"
+
+cpus: 4
+memory: "8GiB"
+disk: "40GiB"
+
+# Keep the VM self-contained by default.
+#
+# If you want to mount local manifests, pass an absolute path at create-time (example):
+#   limactl create --set ".mounts=[{\"location\":\"$(pwd)/manifests\",\"mountPoint\":\"/manifests\",\"writable\":false}]" os.yaml
+mounts: []
+
+containerd:
+  # K3s installs and manages its own containerd.
+  system: false
+  user: false
+
+message: |
+  This VM installs K3s on Ubuntu (GRUB-enabled).
+
+  Verify cgroup mode:
+    limactl shell {{.Name}} -- stat -fc %T /sys/fs/cgroup
+
+  Kubernetes:
+    limactl shell {{.Name}} -- sudo kubectl get nodes -o wide
+
+provision:
+  - mode: system
+    script: |
+      #!/usr/bin/env bash
+      set -eux -o pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -y
+      apt-get install -y --no-install-recommends \
+        ca-certificates curl iptables iproute2 socat conntrack \
+        grub2-common
+
+  - mode: system
+    script: |
+      #!/usr/bin/env bash
+      set -eux -o pipefail
+
+      if ! systemctl is-active --quiet k3s 2>/dev/null; then
+        curl -sfL https://get.k3s.io | \
+          INSTALL_K3S_VERSION="v1.32.0+k3s1" \
+          sh -s - server --write-kubeconfig-mode=644
+      fi
+
+probes:
+  - script: |
+      #!/usr/bin/env bash
+      set -eux -o pipefail
+      if ! timeout 120s bash -c "until test -f /etc/rancher/k3s/k3s.yaml; do sleep 2; done"; then
+        echo >&2 "k3s is not running yet"
+        exit 1
+      fi
+      export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+      kubectl get nodes -o wide
+    hint: |
+      The k3s kubeconfig file has not yet been created.
+      Run: limactl shell {{.Name}} -- sudo journalctl -u k3s

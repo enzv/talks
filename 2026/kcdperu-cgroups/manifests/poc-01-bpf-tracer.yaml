@@ -1,0 +1,83 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bpf-tracer
+  namespace: cg
+  labels:
+    app: bpf-tracer
+spec:
+  restartPolicy: Always
+  tolerations:
+    - operator: Exists
+  volumes:
+    - name: src
+      configMap:
+        name: src
+        defaultMode: 0555
+    - name: build
+      emptyDir: {}
+    - name: sys-kernel-btf
+      hostPath:
+        path: /sys/kernel/btf
+    - name: sys-kernel-tracing
+      hostPath:
+        path: /sys/kernel/tracing
+    - name: sys-kernel-debug
+      hostPath:
+        path: /sys/kernel/debug
+    - name: sys-fs-bpf
+      hostPath:
+        path: /sys/fs/bpf
+  containers:
+    - name: loader
+      image: alpine:3.21
+      imagePullPolicy: IfNotPresent
+      securityContext:
+        privileged: true
+      command: ["/bin/sh", "-ec"]
+      args:
+        - |
+          apk add --no-cache clang llvm bpftool libbpf-dev
+
+          cp /work/bpf.c /tmp/bpf.c
+          cd /tmp
+
+          bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+
+          arch="$(uname -m)"
+          case "$arch" in
+            x86_64) t=x86 ;;
+            aarch64|arm64) t=arm64 ;;
+            *) echo "unsupported arch: $arch" >&2; exit 1 ;;
+          esac
+
+          clang -O2 -g -target bpf -D__TARGET_ARCH_${t} -I. -c bpf.c -o bpf.o
+
+          rm -rf /sys/fs/bpf/ebpf_openat 2>/dev/null || true
+          mkdir -p /sys/fs/bpf/ebpf_openat
+          bpftool prog loadall bpf.o /sys/fs/bpf/ebpf_openat autoattach
+
+          echo "attached; streaming /sys/kernel/tracing/trace_pipe (Ctrl-C to stop)"
+          exec cat /sys/kernel/tracing/trace_pipe
+      volumeMounts:
+        - name: src
+          mountPath: /work
+          readOnly: true
+        - name: build
+          mountPath: /tmp
+        - name: sys-kernel-btf
+          mountPath: /sys/kernel/btf
+          readOnly: true
+        - name: sys-kernel-tracing
+          mountPath: /sys/kernel/tracing
+        - name: sys-kernel-debug
+          mountPath: /sys/kernel/debug
+        - name: sys-fs-bpf
+          mountPath: /sys/fs/bpf
+      resources:
+        requests:
+          cpu: 25m
+          memory: 64Mi
+        limits:
+          cpu: 500m
+          memory: 256Mi

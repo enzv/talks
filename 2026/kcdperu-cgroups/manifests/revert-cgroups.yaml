@@ -1,0 +1,484 @@
+# Switch node cgroup mode (v1 <-> v2) on GRUB-based Linux nodes by editing GRUB
+# cmdline and rebooting the node.
+#
+# This also sets kubelet to tolerate cgroups v1 using official upstream mechanisms:
+# - kubelet flag: --fail-cgroupv1=false (prefer via /etc/default/kubelet or /etc/sysconfig/kubelet)
+# - kubelet config: failCgroupV1: false (fallback)
+#
+# Notes:
+# - Requires GRUB + update-grub/grub2-mkconfig for the flip.
+# - Opt-in per node via label `revert-cgroups=to-v1` or `revert-cgroups=to-v2` (no label = no pods).
+# - Intended for a coordinated maintenance / upgrade window (cordon+drain yourself).
+# - Does not reconfigure your container runtime; it only performs basic preflight checks (kubelet/runtime cgroup driver alignment).
+#
+# WARNING:
+# - Reboots nodes.
+# - Highly OS/bootloader dependent.
+# - Uses privileged + hostPID and patches Node labels.
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: revert-cgroups
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: revert-cgroups
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: revert-cgroups
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: revert-cgroups
+subjects:
+  - kind: ServiceAccount
+    name: revert-cgroups
+    namespace: kube-system
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: revert-cgroups
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app: revert-cgroups
+  template:
+    metadata:
+      labels:
+        app: revert-cgroups
+    spec:
+      serviceAccountName: revert-cgroups
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: revert-cgroups
+                    operator: In
+                    values: ["to-v1"]
+                  - key: cgroup-version
+                    operator: DoesNotExist
+              - matchExpressions:
+                  - key: revert-cgroups
+                    operator: In
+                    values: ["to-v1"]
+                  - key: cgroup-version
+                    operator: NotIn
+                    values: ["v1"]
+              - matchExpressions:
+                  - key: revert-cgroups
+                    operator: In
+                    values: ["to-v2"]
+                  - key: cgroup-version
+                    operator: DoesNotExist
+              - matchExpressions:
+                  - key: revert-cgroups
+                    operator: In
+                    values: ["to-v2"]
+                  - key: cgroup-version
+                    operator: NotIn
+                    values: ["v2"]
+      hostPID: true
+      tolerations:
+        - operator: Exists
+      priorityClassName: system-node-critical
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: revert-cgroups
+          image: nicolaka/netshoot:v0.13
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          command: ["/bin/sh", "-ec"]
+          args:
+            - |
+              [ "${DEBUG:-}" = "1" ] && set -x
+              enter() { nsenter -t 1 -m -u -i -n -p -- "$@"; }
+              forever() { while :; do sleep 3600; done; }
+
+              node="${NODE_NAME:?missing NODE_NAME}"
+              marker_dir=/var/lib/revert-cgroups
+
+              apiserver="https://${KUBERNETES_SERVICE_HOST:-kubernetes.default.svc}:${KUBERNETES_SERVICE_PORT:-443}"
+              cacert=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+
+              get_cgroup_mode() {
+                if enter test -f /sys/fs/cgroup/cgroup.controllers; then
+                  echo v2
+                else
+                  echo v1
+                fi
+              }
+
+              get_node_target() {
+                set +x
+                token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+                if ! json="$(curl -fsS --cacert "${cacert}" -H "Authorization: Bearer ${token}" "${apiserver}/api/v1/nodes/${node}")"; then
+                  [ "${DEBUG:-}" = "1" ] && set -x
+                  return 1
+                fi
+                [ "${DEBUG:-}" = "1" ] && set -x
+
+                val="$(printf '%s' "$json" | tr -d '\n' | sed -n 's/.*"revert-cgroups"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p')"
+                case "$val" in
+                  to-v1) echo v1 ;;
+                  to-v2) echo v2 ;;
+                  *) echo "" ;;
+                esac
+              }
+
+              die() { echo "error: $*"; forever; }
+
+              kubelet_cgroup_driver() {
+                if enter test -d /sys/fs/cgroup/kubepods.slice; then
+                  echo systemd
+                  return 0
+                fi
+                if enter test -d /sys/fs/cgroup/kubepods; then
+                  echo cgroupfs
+                  return 0
+                fi
+                if enter test -d /sys/fs/cgroup/systemd/kubepods.slice || enter test -d /sys/fs/cgroup/name=systemd/kubepods.slice; then
+                  echo systemd
+                  return 0
+                fi
+                for base in /sys/fs/cgroup/cpu /sys/fs/cgroup/memory /sys/fs/cgroup/pids; do
+                  if enter test -d "${base}/kubepods"; then
+                    echo cgroupfs
+                    return 0
+                  fi
+                done
+                if enter test -f /var/lib/kubelet/config.yaml; then
+                  d="$(enter sed -n 's/^[[:space:]]*cgroupDriver:[[:space:]]*//p' /var/lib/kubelet/config.yaml | head -n 1 || true)"
+                  case "$d" in
+                    systemd|cgroupfs) echo "$d"; return 0 ;;
+                  esac
+                fi
+                if enter command -v ps >/dev/null 2>&1; then
+                  a="$(enter ps -eo args 2>/dev/null | enter sed -n 's/.*--cgroup-driver=\\([^ ]*\\).*/\\1/p' | head -n 1 || true)"
+                  case "$a" in
+                    systemd|cgroupfs) echo "$a"; return 0 ;;
+                  esac
+                fi
+                echo unknown
+              }
+
+              runtime_kind() {
+                if enter test -S /run/containerd/containerd.sock || enter test -S /run/k3s/containerd/containerd.sock; then
+                  echo containerd
+                elif enter test -S /var/run/crio/crio.sock || enter test -S /run/crio/crio.sock; then
+                  echo crio
+                elif enter test -S /run/cri-dockerd.sock; then
+                  echo cri-dockerd
+                else
+                  echo unknown
+                fi
+              }
+
+              containerd_systemdcgroup() {
+                for f in \
+                  /etc/containerd/config.toml \
+                  /var/lib/rancher/k3s/agent/etc/containerd/config.toml \
+                ; do
+                  if enter test -f "$f"; then
+                    if enter grep -Eq '^[[:space:]]*SystemdCgroup[[:space:]]*=[[:space:]]*true([[:space:]]*(#.*)?)?$' "$f"; then
+                      echo true
+                      return 0
+                    fi
+                    if enter grep -Eq '^[[:space:]]*SystemdCgroup[[:space:]]*=[[:space:]]*false([[:space:]]*(#.*)?)?$' "$f"; then
+                      echo false
+                      return 0
+                    fi
+                    echo unknown
+                    return 0
+                  fi
+                done
+                echo missing
+              }
+
+              crio_cgroup_manager() {
+                if enter /bin/sh -c 'ls /etc/crio/crio.conf /etc/crio/crio.conf.d/*.conf >/dev/null 2>&1'; then
+                  if enter /bin/sh -c 'cat /etc/crio/crio.conf /etc/crio/crio.conf.d/*.conf 2>/dev/null | grep -Eq "^[[:space:]]*cgroup_manager[[:space:]]*=[[:space:]]*\\\"systemd\\\""'; then
+                    echo systemd
+                    return 0
+                  fi
+                  if enter /bin/sh -c 'cat /etc/crio/crio.conf /etc/crio/crio.conf.d/*.conf 2>/dev/null | grep -Eq "^[[:space:]]*cgroup_manager[[:space:]]*=[[:space:]]*\\\"cgroupfs\\\""'; then
+                    echo cgroupfs
+                    return 0
+                  fi
+                fi
+                echo unknown
+              }
+
+              runtime_cgroup_driver() {
+                case "$(runtime_kind)" in
+                  containerd)
+                    case "$(containerd_systemdcgroup)" in
+                      true) echo systemd ;;
+                      false) echo cgroupfs ;;
+                      *) echo unknown ;;
+                    esac
+                    ;;
+                  crio)
+                    crio_cgroup_manager
+                    ;;
+                  *)
+                    echo unknown
+                    ;;
+                esac
+              }
+
+              preflight_runtime() {
+                want="$1" # v1|v2
+                rt="$(runtime_kind)"
+                kd="$(kubelet_cgroup_driver)"
+                rd="$(runtime_cgroup_driver)"
+                echo "preflight: target=${want} runtime=${rt} kubelet.cgroupDriver=${kd} runtime.cgroupDriver=${rd}"
+
+                [ "$rt" = "unknown" ] && die "could not detect container runtime (need containerd/crio/cri-dockerd)"
+                [ "$kd" = "unknown" ] && die "could not determine kubelet cgroupDriver (need /var/lib/kubelet/config.yaml or a kubelet --cgroup-driver= flag)"
+                [ "$rd" = "unknown" ] && die "could not determine runtime cgroup driver (need containerd SystemdCgroup=true/false or CRI-O cgroup_manager)"
+
+                [ "$kd" = "$rd" ] || die "kubelet/runtime cgroup driver mismatch (${kd} != ${rd})"
+
+                if [ "$want" = "v2" ]; then
+                  [ "$kd" = "systemd" ] || die "cgroups v2 requires systemd cgroup driver"
+                fi
+              }
+
+              set_kubelet_allow_v1() {
+                for f in /etc/default/kubelet /etc/sysconfig/kubelet; do
+                  if enter test -f "$f"; then
+                    echo "set --fail-cgroupv1=false in ${f}"
+                    enter /bin/sh -c '
+                      set -eu
+                      f="$1"
+                      flag="--fail-cgroupv1=false"
+                      if grep -q "^KUBELET_EXTRA_ARGS=" "$f"; then
+                        if grep -q -- "$flag" "$f"; then
+                          exit 0
+                        fi
+                        tmp="${f}.tmp.$$"
+                        sed \
+                          -e "s/^KUBELET_EXTRA_ARGS=\"\\(.*\\)\"/KUBELET_EXTRA_ARGS=\"\\1 ${flag}\"/" \
+                          -e "s/^KUBELET_EXTRA_ARGS=\\([^\"].*\\)/KUBELET_EXTRA_ARGS=\\1 ${flag}/" \
+                          "$f" > "$tmp"
+                        mv "$tmp" "$f"
+                      else
+                        printf "KUBELET_EXTRA_ARGS=\"%s\"\\n" "$flag" >> "$f"
+                      fi
+                    ' _ "$f"
+                    return 0
+                  fi
+                done
+
+                if enter test -f /var/lib/kubelet/config.yaml; then
+                  echo "set failCgroupV1: false in /var/lib/kubelet/config.yaml"
+                  if enter grep -q '^failCgroupV1:' /var/lib/kubelet/config.yaml; then
+                    enter /bin/sh -c '
+                      set -eu
+                      f=/var/lib/kubelet/config.yaml
+                      tmp="${f}.tmp.$$"
+                      sed "s/^failCgroupV1:.*/failCgroupV1: false/" "$f" > "$tmp"
+                      mv "$tmp" "$f"
+                    '
+                  else
+                    enter /bin/sh -c 'printf "\nfailCgroupV1: false\n" >> /var/lib/kubelet/config.yaml'
+                  fi
+                  return 0
+                fi
+
+                if enter test -d /etc/rancher/k3s; then
+                  enter mkdir -p /etc/rancher/k3s
+                  if ! enter test -f /etc/rancher/k3s/config.yaml; then
+                    enter /bin/sh -c 'printf "write-kubeconfig-mode: \"0644\"\n" > /etc/rancher/k3s/config.yaml'
+                  fi
+                  if ! enter grep -q 'fail-cgroupv1=false' /etc/rancher/k3s/config.yaml; then
+                    if enter grep -q '^kubelet-arg:' /etc/rancher/k3s/config.yaml; then
+                      enter /bin/sh -c 'printf "\n  - fail-cgroupv1=false\n" >> /etc/rancher/k3s/config.yaml'
+                    else
+                      enter /bin/sh -c 'printf "\nkubelet-arg:\n  - fail-cgroupv1=false\n" >> /etc/rancher/k3s/config.yaml'
+                    fi
+                  fi
+                  return 0
+                fi
+
+                echo "warning: kubelet config not found; skipping"
+              }
+
+              grub_update_key() {
+                key="$1"
+                unified="$2"
+                legacy="$3"
+                enter /bin/sh -c "
+                  set -eu
+                  key=\$1
+                  unified=\$2
+                  legacy=\$3
+                  f=/etc/default/grub
+                  tmp=\"\${f}.tmp.\$\$\"
+                  awk -v key=\"\$key\" -v unified=\"\$unified\" -v legacy=\"\$legacy\" '
+                    function is_rm(t) {
+                      return index(t, \"systemd.unified_cgroup_hierarchy=\") == 1 || index(t, \"systemd.legacy_systemd_cgroup_controller=\") == 1
+                    }
+                    function add(out, t) { return (out == \"\" ? t : out \" \" t) }
+                    BEGIN { seen = 0 }
+                    \$0 ~ (\"^\" key \"=\") {
+                      if (seen) next
+                      line = \$0
+                      sub(\"^\" key \"=\", \"\", line)
+                      sub(/^\"/, \"\", line)
+                      sub(/\"$/, \"\", line)
+                      n = split(line, a, \" \")
+                      out = \"\"
+                      for (i = 1; i <= n; i++) {
+                        if (a[i] == \"\") continue
+                        if (is_rm(a[i])) continue
+                        out = add(out, a[i])
+                      }
+                      if (unified != \"\") out = add(out, unified)
+                      if (legacy != \"\") out = add(out, legacy)
+                      printf \"%s=\\\"%s\\\"\\n\", key, out
+                      seen = 1
+                      next
+                    }
+                    { print }
+                    END {
+                      if (!seen) {
+                        out = \"\"
+                        if (unified != \"\") out = add(out, unified)
+                        if (legacy != \"\") out = add(out, legacy)
+                        printf \"%s=\\\"%s\\\"\\n\", key, out
+                      }
+                    }
+                  ' \"\$f\" > \"\$tmp\"
+                  mv \"\$tmp\" \"\$f\"
+                " _ "$key" "$unified" "$legacy"
+              }
+
+              grub_set_mode() {
+                want="$1" # v1|v2
+                case "$want" in
+                  v1)
+                    unified="systemd.unified_cgroup_hierarchy=0"
+                    legacy="systemd.legacy_systemd_cgroup_controller=yes"
+                    ;;
+                  v2)
+                    unified="systemd.unified_cgroup_hierarchy=1"
+                    legacy=""
+                    ;;
+                  *)
+                    echo "error: invalid want: $want"
+                    return 1
+                    ;;
+                esac
+                grub_update_key GRUB_CMDLINE_LINUX_DEFAULT "$unified" "$legacy"
+                grub_update_key GRUB_CMDLINE_LINUX "$unified" "$legacy"
+              }
+
+              grub_regen() {
+                if enter test -x /usr/sbin/update-grub; then
+                  enter /usr/sbin/update-grub
+                elif enter test -x /usr/sbin/grub2-mkconfig; then
+                  out=/boot/grub2/grub.cfg
+                  enter test -f /boot/grub/grub.cfg && out=/boot/grub/grub.cfg
+                  enter /usr/sbin/grub2-mkconfig -o "${out}"
+                elif enter test -x /usr/sbin/grub-mkconfig; then
+                  out=/boot/grub/grub.cfg
+                  enter test -f /boot/grub2/grub.cfg && out=/boot/grub2/grub.cfg
+                  enter /usr/sbin/grub-mkconfig -o "${out}"
+                else
+                  echo "error: no update-grub/grub2-mkconfig; won't reboot"
+                  return 1
+                fi
+              }
+
+              patch_node_label() {
+                ver="$1" # v1|v2
+                set +x
+                token="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+                i=0
+                while :; do
+                  i=$((i + 1))
+                  data="$(printf '{"metadata":{"labels":{"cgroup-version":"%s"}}}' "$ver")"
+                  curl -fsS -o /dev/null --cacert "${cacert}" \
+                    -H "Authorization: Bearer ${token}" \
+                    -H "Content-Type: application/merge-patch+json" \
+                    -X PATCH "${apiserver}/api/v1/nodes/${node}" \
+                    -d "$data" && break
+                  echo "node label patch failed (attempt ${i}); retrying..."
+                  sleep 5
+                done
+                [ "${DEBUG:-}" = "1" ] && set -x
+                echo "node labeled: cgroup-version=${ver}"
+              }
+
+              while :; do
+                want="$(get_node_target || true)"
+                if [ -z "$want" ]; then
+                  echo "warning: could not determine target from node label; retrying..."
+                  sleep 10
+                  continue
+                fi
+
+                mode="$(get_cgroup_mode)"
+                echo "target=${want} mode=${mode}"
+
+                marker_file="${marker_dir}/${want}-requested"
+
+                if [ "$want" = "v1" ]; then
+                  set_kubelet_allow_v1
+                fi
+
+                if [ "$mode" != "$want" ]; then
+                  preflight_runtime "$want"
+                  if enter test -f "${marker_file}"; then
+                    echo "marker exists (${marker_file}); waiting"
+                    sleep 30
+                    continue
+                  fi
+
+                  if ! enter test -f /etc/default/grub; then
+                    echo "error: /etc/default/grub not found; not a GRUB node"
+                    sleep 30
+                    continue
+                  fi
+
+                  echo "patching GRUB for ${want} + reboot"
+                  grub_set_mode "$want"
+                  grub_regen || { sleep 30; continue; }
+
+                  enter mkdir -p "${marker_dir}"
+                  enter /bin/sh -c 'date "+%Y-%m-%dT%H:%M:%S%z" > "$1"' _ "${marker_file}"
+
+                  enter systemctl reboot || enter reboot || true
+                  forever
+                fi
+
+                enter rm -f "${marker_file}" 2>/dev/null || true
+                patch_node_label "$want"
+                sleep 60
+              done
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 200Mi
