@@ -1,0 +1,371 @@
+diff --git a/config/flagd/flags.json b/config/flagd/demo.flagd.json
+similarity index 70%
+rename from config/flagd/flags.json
+rename to config/flagd/demo.flagd.json
+index c325b837abd34fc5517c2c9c93860ba6f8b81bb9..39cc9eb947af001ac265caa886e6dc7ec48c2a47 100644
+--- a/config/flagd/flags.json
++++ b/config/flagd/demo.flagd.json
+@@ -1,22 +1,17 @@
+ {
+   "flags": {
+-    "new-welcome-message": {
++    "checkout-v2": {
++      "defaultVariant": "off",
++      "description": "Use the new high-performance checkout",
+       "state": "ENABLED",
+       "variants": {
+-        "on": true,
+-        "off": false
+-      },
+-      "defaultVariant": "off"
++        "off": false,
++        "on": true
++      }
+     },
+-    "hex-color": {
++    "fib-algo": {
++      "defaultVariant": "recursive",
+       "state": "ENABLED",
+-      "variants": {
+-        "red": "c05543",
+-        "green": "2f5230",
+-        "blue": "0d507b",
+-        "yellow": "d4ac0d"
+-      },
+-      "defaultVariant": "blue",
+       "targeting": {
+         "if": [
+           {
+@@ -29,28 +24,20 @@
+               }
+             ]
+           },
+-          "yellow",
++          "binet",
+           null
+         ]
+-      }
+-    },
+-    "use-remote-fib-service": {
+-      "state": "ENABLED",
+-      "variants": {
+-        "on": true,
+-        "off": false
+       },
+-      "defaultVariant": "off"
+-    },
+-    "fib-algo": {
+-      "state": "ENABLED",
+       "variants": {
+-        "recursive": "recursive",
+-        "memo": "memo",
++        "binet": "binet",
+         "loop": "loop",
+-        "binet": "binet"
+-      },
+-      "defaultVariant": "recursive",
++        "memo": "memo",
++        "recursive": "recursive"
++      }
++    },
++    "hex-color": {
++      "defaultVariant": "green",
++      "state": "ENABLED",
+       "targeting": {
+         "if": [
+           {
+@@ -63,9 +50,31 @@
+               }
+             ]
+           },
+-          "binet",
++          "yellow",
+           null
+         ]
++      },
++      "variants": {
++        "blue": "0d507b",
++        "green": "2f5230",
++        "red": "c05543",
++        "yellow": "d4ac0d"
++      }
++    },
++    "new-welcome-message": {
++      "defaultVariant": "on",
++      "state": "ENABLED",
++      "variants": {
++        "off": false,
++        "on": true
++      }
++    },
++    "use-remote-fib-service": {
++      "defaultVariant": "off",
++      "state": "ENABLED",
++      "variants": {
++        "off": false,
++        "on": true
+       }
+     }
+   }
+diff --git a/config/otel/collector.yaml b/config/otel/collector.yaml
+index 9e5ccb31502c1a2a334c4c7ba6a9e3b6e39b1566..8c1f6b0904684a94c60b44445d9c21526e4ee0a2 100644
+--- a/config/otel/collector.yaml
++++ b/config/otel/collector.yaml
+@@ -2,6 +2,9 @@ receivers:
+   otlp:
+     protocols:
+       grpc:
++        endpoint: "0.0.0.0:4317"
++      http:
++        endpoint: "0.0.0.0:4318"
+ exporters:
+   prometheus:
+     endpoint: "0.0.0.0:8889"
+diff --git a/docker-compose.yaml b/docker-compose.yaml
+index 24fac894794d393a64a3b2dc5b47ab8fc59f704a..4ee4741e4fca0c95055b381df6c65943ecbb376f 100644
+--- a/docker-compose.yaml
++++ b/docker-compose.yaml
+@@ -1,10 +1,10 @@
+ version: '3.8'
+ services:
+   demo:
+-    image: ghcr.io/open-feature/playground-app:v0.16.0 # x-release-please-version
+-    # build:
+-    #  dockerfile: ./packages/app/Dockerfile
+-    #  context: .
++    image: playground-app:checkout-demo
++    build:
++      dockerfile: ./packages/app/Dockerfile
++      context: .
+     ports:
+       - '30000:30000'
+     command:
+@@ -14,10 +14,11 @@ services:
+       - flagd
+       - jaeger
+       - fib-service
+-    volumes:
+-      - ./config/flagd/flags.json:/opt/playground/config/flagd/flags.json
+     environment:
+       - FLAGD_HOST=flagd
++      # Current Node provider uses evaluation v2 RPC; flagd v0.11.5 supports v1.
++      # Its sync API remains compatible with the provider's in-process resolver.
++      - FLAGD_RESOLVER=in-process
+       - OTEL_EXPORTER_JAEGER_AGENT_HOST=jaeger
+       - OTEL_EXPORTER_JAEGER_AGENT_PORT=6832
+       - GO_FEATURE_FLAG_URL=http://go-feature-flag:1031
+@@ -97,6 +98,7 @@ services:
+       - "8888"   # Prometheus metrics exposed by the collector
+       - "8889"   # Prometheus exporter metrics
+       - "4317"   # OTLP gRPC receiver
++      - "4318"   # OTLP HTTP receiver
+     depends_on:
+       - jaeger
+       - prometheus
+@@ -117,17 +119,44 @@ services:
+       - --cors-origin
+       - '*'
+       - --sources
+-      - '[{"uri":"etc/flagd/flags.json","provider":"file","selector":"etc/flagd/flags.json"}]'
++      - '[{"uri":"etc/flagd/demo.flagd.json","provider":"file","selector":"etc/flagd/demo.flagd.json"}]'
+       - --metrics-exporter
+       - otel
+       - --otel-collector-uri
+       - otel-collector:4317
+     volumes:
+-      - ./config/flagd/flags.json:/etc/flagd/flags.json
++      - ./config/flagd:/etc/flagd
+     ports:
+       - '8013:8013'
+       - '8016:8016'
+ 
++  flagd-ui:
++    image: ghcr.io/open-telemetry/demo:latest-flagd-ui
++    container_name: flagd-ui
++    restart: unless-stopped
++    # The official image defaults to the Demo proxy's /feature prefix.
++    # Configure direct HTTP access at localhost:4000 without a proxy.
++    command:
++      - sh
++      - -ec
++      - |
++        sed -i 's|url: \[host: host, port: 443, scheme: "https"\]|url: [host: host, port: port, scheme: "http", path: "/"]|' /app/releases/*/runtime.exs
++        ulimit -n 65536
++        exec /app/bin/server
++    environment:
++      FLAGD_UI_PORT: "4000"
++      PHX_HOST: localhost
++      SECRET_KEY_BASE: "yYrECL4qbNwleYInGJYvVnSkwJuSQJ4ijPTx5tirGUXrbznFIBFVJdPl5t6O9ASw"
++      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
++      OTEL_SERVICE_NAME: flagd-ui
++    ports:
++      - "4000:4000"
++    volumes:
++      - ./config/flagd:/app/data
++    depends_on:
++      - flagd
++      - otel-collector
++
+   go-feature-flag:
+     image: thomaspoignant/go-feature-flag:v1.40.0
+     volumes:
+diff --git a/package-lock.json b/package-lock.json
+index 8d86c9c11770c17861329e2f01f049b947995e0f..a75ed24b8dcbae1b17a63744a41dff85347321df 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -20051,6 +20051,19 @@
+         "tao": "index.js"
+       }
+     },
++    "node_modules/nx/node_modules/js-yaml": {
++      "version": "4.1.0",
++      "resolved": "https://registry.npmjs.org/js-yaml/-/js-yaml-4.1.0.tgz",
++      "integrity": "sha512-wpxZs9NoxZaJESJGIZTyDEaYpl0FKSA+FB9aJiyemKhMwkxQg63h4T1KJgUGHpTqPDNRcmmYLugrRjJlBtWvRA==",
++      "dev": true,
++      "license": "MIT",
++      "dependencies": {
++        "argparse": "^2.0.1"
++      },
++      "bin": {
++        "js-yaml": "bin/js-yaml.js"
++      }
++    },
+     "node_modules/nx/node_modules/jsonc-parser": {
+       "version": "3.2.0",
+       "resolved": "https://registry.npmjs.org/jsonc-parser/-/jsonc-parser-3.2.0.tgz",
+@@ -20058,6 +20071,22 @@
+       "dev": true,
+       "license": "MIT"
+     },
++    "node_modules/nx/node_modules/minimatch": {
++      "version": "9.0.3",
++      "resolved": "https://registry.npmjs.org/minimatch/-/minimatch-9.0.3.tgz",
++      "integrity": "sha512-RHiac9mvaRw0x3AYRgDC1CxAP7HTcNrrECeA8YYJeWnpo+2Q5CegtZjaotWTWxDG3UeGA1coE05iH1mPjT/2mg==",
++      "dev": true,
++      "license": "ISC",
++      "dependencies": {
++        "brace-expansion": "^2.0.1"
++      },
++      "engines": {
++        "node": ">=16 || 14 >=14.17"
++      },
++      "funding": {
++        "url": "https://github.com/sponsors/isaacs"
++      }
++    },
+     "node_modules/nx/node_modules/ora": {
+       "version": "5.3.0",
+       "resolved": "https://registry.npmjs.org/ora/-/ora-5.3.0.tgz",
+diff --git a/packages/app/Dockerfile b/packages/app/Dockerfile
+index 9bd26c862c9a02e75a07cb9e6e59d02de585474e..3e62baa70467923e4f37e9f122840f4dcbefaa51 100644
+--- a/packages/app/Dockerfile
++++ b/packages/app/Dockerfile
+@@ -2,7 +2,8 @@ FROM node:20.18-bullseye AS builder
+ WORKDIR /tmp/playground/
+ COPY package*.json tsconfig*.json nx.json babel.config.json ./
+ COPY schemas/ ./schemas/
+-RUN npm ci
++# The repository mixes Nest schematics/React tooling with older peer versions.
++RUN npm ci --legacy-peer-deps
+ COPY packages/ ./packages/
+ RUN npm run build:app
+ 
+@@ -10,7 +11,7 @@ FROM node:20-alpine as app
+ 
+ WORKDIR /opt/playground/
+ COPY package*.json ./
+-RUN npm ci --omit=dev
++RUN npm ci --omit=dev --legacy-peer-deps
+ 
+ COPY --from=builder /tmp/playground/dist ./dist
+ # Tracing script
+diff --git a/packages/app/src/app/app.module.ts b/packages/app/src/app/app.module.ts
+index fde1a1a47ef56543cb2f5ed351bc9768ac927491..6bb9ca7befe7489a7e055bd82cb697da826ebaf7 100644
+--- a/packages/app/src/app/app.module.ts
++++ b/packages/app/src/app/app.module.ts
+@@ -12,6 +12,8 @@ import { FibonacciAsAServiceController } from './fibonacci-as-a-service.controll
+ import { FibonacciService } from './fibonacci/fibonacci.service';
+ import { ProvidersController } from './providers.controller';
+ import { UtilsController } from './utils.controller';
++import { CheckoutController } from './checkout/checkout.controller';
++import { CheckoutService } from './checkout/checkout.service';
+ import { EvaluationContext, OpenFeatureModule } from '@openfeature/nestjs-sdk';
+ import type { EvaluationDetails, FlagValue, HookContext } from '@openfeature/server-sdk';
+ 
+@@ -76,7 +78,7 @@ function attributeMapper(_hookContext: HookContext, evaluationDetails: Evaluatio
+       },
+     }),
+   ],
+-  controllers: [FibonacciAsAServiceController, UtilsController, ProvidersController],
+-  providers: [FibonacciService, ProviderService],
++  controllers: [FibonacciAsAServiceController, UtilsController, ProvidersController, CheckoutController],
++  providers: [FibonacciService, ProviderService, CheckoutService],
+ })
+ export class AppModule {}
+diff --git a/packages/app/src/app/checkout/checkout.controller.ts b/packages/app/src/app/checkout/checkout.controller.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..2d90450fdd8fd5a761429e3f7265a47008b91529
+--- /dev/null
++++ b/packages/app/src/app/checkout/checkout.controller.ts
+@@ -0,0 +1,13 @@
++import { Controller, HttpCode, Post } from '@nestjs/common';
++import { CheckoutService } from './checkout.service';
++
++@Controller('checkout')
++export class CheckoutController {
++  constructor(private readonly checkoutService: CheckoutService) {}
++
++  @Post()
++  @HttpCode(200)
++  checkout() {
++    return this.checkoutService.checkout();
++  }
++}
+diff --git a/packages/app/src/app/checkout/checkout.service.ts b/packages/app/src/app/checkout/checkout.service.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..1ad8ba32ad41ad128574acf6ff6cc00d57ccca9b
+--- /dev/null
++++ b/packages/app/src/app/checkout/checkout.service.ts
+@@ -0,0 +1,42 @@
++import { Injectable, ServiceUnavailableException } from '@nestjs/common';
++import { Client, OpenFeatureClient } from '@openfeature/nestjs-sdk';
++
++@Injectable()
++export class CheckoutService {
++  private v2StartedAt?: number;
++
++  constructor(@OpenFeatureClient() private readonly client: Client) {}
++
++  async checkout() {
++    const useV2 = await this.client.getBooleanValue('checkout-v2', false);
++
++    if (useV2) {
++      return this.newCheckout();
++    }
++
++    this.v2StartedAt = undefined;
++    return this.stableCheckout();
++  }
++
++  private async stableCheckout() {
++    await this.sleep(700);
++    return { status: 'paid', checkout: 'stable' };
++  }
++
++  private async newCheckout() {
++    this.v2StartedAt ??= Date.now();
++    const runningFor = Date.now() - this.v2StartedAt;
++    await this.sleep(150);
++
++    // Demo only: after five healthy seconds, simulate intermittent dependency failures.
++    if (runningFor >= 5000 && Math.random() < 0.4) {
++      throw new ServiceUnavailableException('Checkout V2 dependency unavailable');
++    }
++
++    return { status: 'paid', checkout: 'v2' };
++  }
++
++  private sleep(ms: number) {
++    return new Promise((resolve) => setTimeout(resolve, ms));
++  }
++}
