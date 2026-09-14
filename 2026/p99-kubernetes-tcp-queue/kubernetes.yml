@@ -1,0 +1,282 @@
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tcp-notsent-poc
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server-baseline
+  namespace: tcp-notsent-poc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tcp-notsent-server
+      variant: baseline
+  template:
+    metadata:
+      labels:
+        app: tcp-notsent-server
+        variant: baseline
+    spec:
+      securityContext:
+        sysctls:
+        - name: net.ipv4.tcp_notsent_lowat
+          value: "4294967295"
+      containers:
+      - name: server
+        image: localhost/tcp-notsent-poc:e2e
+        imagePullPolicy: IfNotPresent
+        args:
+        - -mode=server
+        ports:
+        - containerPort: 8080
+          name: h2c
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+          runAsUser: 0
+          runAsGroup: 0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server-baseline
+  namespace: tcp-notsent-poc
+spec:
+  selector:
+    app: tcp-notsent-server
+    variant: baseline
+  ports:
+  - name: h2c
+    port: 8080
+    targetPort: h2c
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server-notsent-128k
+  namespace: tcp-notsent-poc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tcp-notsent-server
+      variant: notsent-128k
+  template:
+    metadata:
+      labels:
+        app: tcp-notsent-server
+        variant: notsent-128k
+    spec:
+      securityContext:
+        sysctls:
+        - name: net.ipv4.tcp_notsent_lowat
+          value: "131072"
+      containers:
+      - name: server
+        image: localhost/tcp-notsent-poc:e2e
+        imagePullPolicy: IfNotPresent
+        args:
+        - -mode=server
+        ports:
+        - containerPort: 8080
+          name: h2c
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+          runAsUser: 0
+          runAsGroup: 0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server-notsent-128k
+  namespace: tcp-notsent-poc
+spec:
+  selector:
+    app: tcp-notsent-server
+    variant: notsent-128k
+  ports:
+  - name: h2c
+    port: 8080
+    targetPort: h2c
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server-notsent-4k
+  namespace: tcp-notsent-poc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tcp-notsent-server
+      variant: notsent-4k
+  template:
+    metadata:
+      labels:
+        app: tcp-notsent-server
+        variant: notsent-4k
+    spec:
+      securityContext:
+        sysctls:
+        - name: net.ipv4.tcp_notsent_lowat
+          value: "4096"
+      containers:
+      - name: server
+        image: localhost/tcp-notsent-poc:e2e
+        imagePullPolicy: IfNotPresent
+        args:
+        - -mode=server
+        ports:
+        - containerPort: 8080
+          name: h2c
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+          runAsUser: 0
+          runAsGroup: 0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: server-notsent-4k
+  namespace: tcp-notsent-poc
+spec:
+  selector:
+    app: tcp-notsent-server
+    variant: notsent-4k
+  ports:
+  - name: h2c
+    port: 8080
+    targetPort: h2c
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scenario-baseline
+  namespace: tcp-notsent-poc
+spec:
+  backoffLimit: 0
+  suspend: true
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: scenario
+        image: localhost/tcp-notsent-poc:e2e
+        imagePullPolicy: IfNotPresent
+        args:
+        - -variant=baseline
+        ports:
+        - containerPort: 9090
+          name: metrics
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: notsent-ebpf
+  namespace: tcp-notsent-poc
+spec:
+  selector:
+    matchLabels:
+      app: tcp-notsent-ebpf
+  template:
+    metadata:
+      labels:
+        app: tcp-notsent-ebpf
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9091"
+    spec:
+      hostPID: true
+      containers:
+      - name: ebpf
+        image: localhost/tcp-notsent-poc:e2e
+        imagePullPolicy: IfNotPresent
+        args:
+        - -mode=ebpf
+        - -variant=node
+        securityContext:
+          privileged: true
+          runAsUser: 0
+          runAsGroup: 0
+          capabilities:
+            add:
+            - SYS_RESOURCE
+        ports:
+        - containerPort: 9091
+          name: metrics
+        volumeMounts:
+        - name: sys
+          mountPath: /sys
+          readOnly: true
+      volumes:
+      - name: sys
+        hostPath:
+          path: /sys
+          type: Directory
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scenario-notsent-128k
+  namespace: tcp-notsent-poc
+spec:
+  backoffLimit: 0
+  suspend: true
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: scenario
+        image: localhost/tcp-notsent-poc:e2e
+        imagePullPolicy: IfNotPresent
+        args:
+        - -variant=notsent-128k
+        ports:
+        - containerPort: 9090
+          name: metrics
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: scenario-notsent-4k
+  namespace: tcp-notsent-poc
+spec:
+  backoffLimit: 0
+  suspend: true
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
+    spec:
+      restartPolicy: Never
+      containers:
+      - name: scenario
+        image: localhost/tcp-notsent-poc:e2e
+        imagePullPolicy: IfNotPresent
+        args:
+        - -variant=notsent-4k
+        ports:
+        - containerPort: 9090
+          name: metrics

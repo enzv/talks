@@ -1,0 +1,29 @@
+FROM docker.io/library/golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN mkdir -p /out
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/poc .
+
+FROM docker.io/library/debian:trixie-slim AS bpf
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends bpftool clang llvm libbpf-dev make \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY notsent.bpf.c .
+RUN mkdir -p /out
+RUN bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h \
+    && clang -O2 -g -target bpf -D__TARGET_ARCH_x86 -I. -c notsent.bpf.c -o /out/notsent_bpf.o \
+    && llvm-strip -g /out/notsent_bpf.o
+
+FROM docker.io/library/debian:trixie-slim
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get -o Acquire::ForceIPv4=true update \
+    && apt-get -o Acquire::ForceIPv4=true install -y --no-install-recommends iproute2 ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+ENV PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+COPY --from=build /out/poc /usr/local/bin/poc
+COPY --from=bpf /out/notsent_bpf.o /poc/notsent_bpf.o
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/poc"]
