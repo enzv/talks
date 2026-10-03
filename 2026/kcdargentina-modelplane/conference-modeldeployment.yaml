@@ -1,0 +1,28 @@
+apiVersion: modelplane.ai/v1alpha1
+kind: ModelDeployment
+metadata:
+  name: conference-model
+  namespace: ml-team
+spec:
+  replicas: 1
+  template:
+    spec:
+      engines:
+      - name: conference
+        members:
+        - role: Standalone
+          nodeSelector:
+            devices:
+            - name: gpu
+              count: 1
+              selectors:
+              - cel: |
+                  device.capacity["gpu.example.com"].memory.compareTo(quantity("100Gi")) >= 0
+          template:
+            spec:
+              containers:
+              - name: engine
+                # The pinned Minikube image already contains this tiny container.
+                # It gives the demo a real Pod to schedule and a real DRA claim to
+                # allocate. It does not serve a model.
+                image: registry.k8s.io/pause@sha256:278fb9dbcca9518083ad1e11276933a2e96f23de604a3a08cc3c80002767d24c

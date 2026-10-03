@@ -1,0 +1,104 @@
+# This file describes the platform around the demo workload. The workload
+# declaration lives in conference-modeldeployment.yaml, so the two sides stay easy to
+# read on their own.
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ml-team
+---
+# This gateway belongs to the control plane. Its MetalLB range is separate from
+# the ranges used by the two worker clusters. The 172.18 prefix is a template
+# value; the Makefile aligns it with the local Docker network.
+apiVersion: modelplane.ai/v1alpha1
+kind: InferenceGateway
+metadata:
+  name: default
+spec:
+  backend: Traefik
+  traefik:
+    version: "40.2.0"
+    loadBalancer: MetalLB
+    metallb:
+      addressPool: "172.18.255.200-172.18.255.250"
+---
+# These capacities are simulated device metadata. The upstream
+# dra-example-driver publishes the devices without requiring GPU hardware.
+# worker-b uses a local build of that driver whose single device reports 141Gi,
+# while worker-a reports the upstream 80Gi profile.
+apiVersion: modelplane.ai/v1alpha1
+kind: InferenceClass
+metadata:
+  name: synthetic-h100
+spec:
+  description: "Simulated H100-class device; no physical GPU"
+  devices:
+  - name: gpu
+    claim: DRA
+    driver: gpu.example.com
+    deviceClassName: gpu.example.com
+    count: 1
+    attributes:
+      model:
+        string: "H100-ish (simulated)"
+    capacity:
+      memory:
+        value: "80Gi"
+---
+apiVersion: modelplane.ai/v1alpha1
+kind: InferenceClass
+metadata:
+  name: synthetic-h200
+spec:
+  description: "Simulated H200-class device; no physical GPU"
+  devices:
+  - name: gpu
+    claim: DRA
+    driver: gpu.example.com
+    deviceClassName: gpu.example.com
+    count: 1
+    attributes:
+      model:
+        string: "H200-ish (simulated)"
+    capacity:
+      memory:
+        value: "141Gi"
+---
+# Each InferenceCluster is an existing local worker registered through a
+# kubeconfig Secret in modelplane-system. The pool name matches the node label
+# used by the local DRA setup.
+apiVersion: modelplane.ai/v1alpha1
+kind: InferenceCluster
+metadata:
+  name: worker-a
+  labels:
+    modelplane.ai/region: local-a
+spec:
+  cluster:
+    source: Existing
+    existing:
+      secretRef:
+        name: local-cluster-kubeconfig
+        key: kubeconfig
+  nodePools:
+  - name: gpu-synthetic
+    className: synthetic-h100
+    nodeCount: 1
+---
+apiVersion: modelplane.ai/v1alpha1
+kind: InferenceCluster
+metadata:
+  name: worker-b
+  labels:
+    modelplane.ai/region: local-b
+spec:
+  cluster:
+    source: Existing
+    existing:
+      secretRef:
+        name: worker-b-cluster-kubeconfig
+        key: kubeconfig
+  nodePools:
+  - name: gpu-synthetic
+    className: synthetic-h200
+    nodeCount: 1
