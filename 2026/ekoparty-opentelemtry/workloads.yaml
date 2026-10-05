@@ -1,0 +1,417 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dispatch-core
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: config
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shipment-api
+  namespace: dispatch-core
+  annotations:
+    trace-lab.io/allowed-edges: |
+      [
+        {"target":"config-server.config.svc.cluster.local","method":"GET","path":"/*"},
+        {"target":"routing-api.dispatch-core.svc.cluster.local","method":"POST","path":"/v1/routes/plan"},
+        {"target":"routing-api.dispatch-core.svc.cluster.local","method":"POST","path":"/v1/routes/replan"},
+        {"target":"notification-api.dispatch-core.svc.cluster.local","method":"POST","path":"/v1/notifications"}
+      ]
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: shipment-api
+  template:
+    metadata:
+      labels:
+        app: shipment-api
+        app.kubernetes.io/name: shipment-api
+        app.kubernetes.io/part-of: dispatch-core
+      annotations:
+        instrumentation.opentelemetry.io/inject-go: dispatch-instrumentation
+        instrumentation.opentelemetry.io/otel-go-auto-target-exe: /app/trace-lab
+    spec:
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: shipment-api
+          image: trace-lab:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/app/trace-lab"]
+          args: ["shipment-api"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: shipment-api
+            - name: CONFIG_SERVER_URL
+              value: http://config-server.config.svc.cluster.local:8080
+            - name: PORT
+              value: "8080"
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shipment-api
+  namespace: dispatch-core
+spec:
+  selector:
+    app: shipment-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: routing-api
+  namespace: dispatch-core
+  annotations:
+    trace-lab.io/allowed-edges: |
+      [
+        {"target":"config-server.config.svc.cluster.local","method":"GET","path":"/*"}
+      ]
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: routing-api
+  template:
+    metadata:
+      labels:
+        app: routing-api
+        app.kubernetes.io/name: routing-api
+        app.kubernetes.io/part-of: dispatch-core
+      annotations:
+        instrumentation.opentelemetry.io/inject-go: dispatch-instrumentation
+        instrumentation.opentelemetry.io/otel-go-auto-target-exe: /app/trace-lab
+    spec:
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: routing-api
+          image: trace-lab:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/app/trace-lab"]
+          args: ["routing-api"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: routing-api
+            - name: CONFIG_SERVER_URL
+              value: http://config-server.config.svc.cluster.local:8080
+            - name: PORT
+              value: "8080"
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: routing-api
+  namespace: dispatch-core
+spec:
+  selector:
+    app: routing-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tracking-api
+  namespace: dispatch-core
+  annotations:
+    trace-lab.io/allowed-edges: |
+      [
+        {"target":"config-server.config.svc.cluster.local","method":"GET","path":"/*"},
+        {"target":"notification-api.dispatch-core.svc.cluster.local","method":"POST","path":"/v1/notifications"}
+      ]
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tracking-api
+  template:
+    metadata:
+      labels:
+        app: tracking-api
+        app.kubernetes.io/name: tracking-api
+        app.kubernetes.io/part-of: dispatch-core
+      annotations:
+        instrumentation.opentelemetry.io/inject-go: dispatch-instrumentation
+        instrumentation.opentelemetry.io/otel-go-auto-target-exe: /app/trace-lab
+    spec:
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: tracking-api
+          image: trace-lab:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/app/trace-lab"]
+          args: ["tracking-api"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: tracking-api
+            - name: CONFIG_SERVER_URL
+              value: http://config-server.config.svc.cluster.local:8080
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: dispatch-db-app
+                  key: DATABASE_URL
+            - name: PORT
+              value: "8080"
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tracking-api
+  namespace: dispatch-core
+spec:
+  selector:
+    app: tracking-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: notification-api
+  namespace: dispatch-core
+  annotations:
+    trace-lab.io/allowed-edges: |
+      [
+        {"target":"config-server.config.svc.cluster.local","method":"GET","path":"/*"}
+      ]
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: notification-api
+  template:
+    metadata:
+      labels:
+        app: notification-api
+        app.kubernetes.io/name: notification-api
+        app.kubernetes.io/part-of: dispatch-core
+      annotations:
+        instrumentation.opentelemetry.io/inject-go: dispatch-instrumentation
+        instrumentation.opentelemetry.io/otel-go-auto-target-exe: /app/trace-lab
+    spec:
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: notification-api
+          image: trace-lab:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/app/trace-lab"]
+          args: ["notification-api"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: notification-api
+            - name: CONFIG_SERVER_URL
+              value: http://config-server.config.svc.cluster.local:8080
+            - name: PORT
+              value: "8080"
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: notification-api
+  namespace: dispatch-core
+spec:
+  selector:
+    app: notification-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: config-server
+  namespace: config
+  annotations:
+    trace-lab.io/allowed-edges: '[]'
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: config-server
+  template:
+    metadata:
+      labels:
+        app: config-server
+        app.kubernetes.io/name: config-server
+        app.kubernetes.io/part-of: dispatch-core
+      annotations:
+        instrumentation.opentelemetry.io/inject-go: config-instrumentation
+        instrumentation.opentelemetry.io/otel-go-auto-target-exe: /app/trace-lab
+    spec:
+      shareProcessNamespace: true
+      terminationGracePeriodSeconds: 5
+      containers:
+        - name: config-server
+          image: trace-lab:dev
+          imagePullPolicy: IfNotPresent
+          command: ["/app/trace-lab"]
+          args: ["config-server"]
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: OTEL_SERVICE_NAME
+              value: config-server
+            - name: TRACKING_URL
+              value: http://tracking-api.dispatch-core.svc.cluster.local:8080
+            - name: SHIPMENT_URL
+              value: http://shipment-api.dispatch-core.svc.cluster.local:8080
+            - name: INTERNAL_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dispatch-internal-auth
+                  key: INTERNAL_KEY
+            - name: PORT
+              value: "8080"
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: config-server
+  namespace: config
+spec:
+  selector:
+    app: config-server
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -1,0 +1,243 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: otel-collector
+  namespace: otel
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: otel-k8sattributes
+rules:
+  - apiGroups: [""]
+    resources: ["pods", "namespaces", "nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets", "deployments"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: otel-k8sattributes
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: otel-k8sattributes
+subjects:
+  - kind: ServiceAccount
+    name: otel-collector
+    namespace: otel
+---
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: otel-gateway
+  namespace: otel
+spec:
+  mode: deployment
+  replicas: 1
+  serviceAccount: otel-collector
+  image: otel/opentelemetry-collector-contrib:0.159.0
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  config:
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      memory_limiter:
+        check_interval: 1s
+        limit_percentage: 80
+        spike_limit_percentage: 25
+      k8s_attributes:
+        auth_type: serviceAccount
+      filter/low_value:
+        error_mode: ignore
+        traces:
+          span:
+            - name == "GET /healthz"
+      batch:
+        timeout: 2s
+        send_batch_size: 128
+      resource/siem:
+        attributes:
+          - key: siem.enabled
+            value: "false"
+            action: upsert
+      transform/clock:
+        error_mode: ignore
+        trace_statements:
+          - context: span
+            statements:
+              - set(span.cache["duration_nanos"], span.end_time_unix_nano - span.start_time_unix_nano)
+              - set(span.end_time_unix_nano, UnixNano(Now()))
+              - set(span.start_time_unix_nano, span.end_time_unix_nano - span.cache["duration_nanos"])
+    connectors:
+      service_graph:
+        metrics_flush_interval: 5s
+        latency_histogram_buckets: [10ms, 50ms, 100ms, 250ms, 500ms, 1s, 5s]
+      routing/siem:
+        table:
+          - condition: resource.attributes["siem.enabled"] == "true"
+            pipelines: [traces/siem]
+    exporters:
+      otlp_grpc/tempo:
+        endpoint: tempo.tempo.svc.cluster.local:4317
+        tls:
+          insecure: true
+      otlp_grpc/opensearch_traces:
+        endpoint: data-prepper.opensearch.svc.cluster.local:21890
+        tls:
+          insecure: true
+      prometheus_remote_write:
+        endpoint: http://prometheus-server.prometheus.svc.cluster.local/api/v1/write
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [memory_limiter, k8s_attributes, filter/low_value, resource/siem, transform/clock, batch]
+          exporters: [otlp_grpc/tempo, routing/siem]
+        traces/service_graph:
+          receivers: [otlp]
+          processors: [memory_limiter, k8s_attributes, filter/low_value, resource/siem, batch]
+          exporters: [service_graph]
+        traces/siem:
+          receivers: [routing/siem]
+          processors: [memory_limiter, batch]
+          exporters: [otlp_grpc/opensearch_traces]
+        metrics/service_graph:
+          receivers: [service_graph]
+          processors: [memory_limiter, batch]
+          exporters: [prometheus_remote_write]
+---
+apiVersion: opentelemetry.io/v1beta1
+kind: OpenTelemetryCollector
+metadata:
+  name: otel-logs
+  namespace: otel
+spec:
+  mode: daemonset
+  serviceAccount: otel-collector
+  image: otel/opentelemetry-collector-contrib:0.159.0
+  volumeMounts:
+    - name: pod-logs
+      mountPath: /var/log/pods
+      readOnly: true
+    - name: docker-containers
+      mountPath: /var/lib/docker/containers
+      readOnly: true
+  volumes:
+    - name: pod-logs
+      hostPath:
+        path: /var/log/pods
+        type: Directory
+    - name: docker-containers
+      hostPath:
+        path: /var/lib/docker/containers
+        type: Directory
+  config:
+    receivers:
+      file_log/kubernetes:
+        include:
+          - /var/log/pods/dispatch-core_*/*/*.log
+          - /var/log/pods/config_*/*/*.log
+        exclude:
+          - /var/log/pods/dispatch-core_dispatch-db-*/*/*.log
+          - /var/log/pods/dispatch-core_*/*/opentelemetry-auto-instrumentation/*.log
+        start_at: end
+        include_file_path: true
+        operators:
+          - type: container
+          - type: json_parser
+            parse_from: body
+            on_error: send
+    processors:
+      k8s_attributes:
+        auth_type: serviceAccount
+        extract:
+          metadata:
+            - k8s.namespace.name
+            - k8s.pod.name
+            - k8s.container.name
+      batch:
+        timeout: 2s
+        send_batch_size: 128
+      resource/siem:
+        attributes:
+          - key: siem.enabled
+            value: "false"
+            action: upsert
+    connectors:
+      routing/siem:
+        table:
+          - condition: resource.attributes["siem.enabled"] == "true"
+            pipelines: [logs/siem]
+    exporters:
+      otlp_http/loki:
+        endpoint: http://loki.loki.svc.cluster.local:3100/otlp
+      otlp_grpc/opensearch_logs:
+        endpoint: data-prepper.opensearch.svc.cluster.local:21892
+        tls:
+          insecure: true
+    service:
+      pipelines:
+        logs:
+          receivers: [file_log/kubernetes]
+          processors: [k8s_attributes, resource/siem, batch]
+          exporters: [otlp_http/loki, routing/siem]
+        logs/siem:
+          receivers: [routing/siem]
+          processors: [batch]
+          exporters: [otlp_grpc/opensearch_logs]
+---
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: dispatch-instrumentation
+  namespace: dispatch-core
+spec:
+  exporter:
+    endpoint: http://otel-gateway-collector.otel.svc.cluster.local:4318
+  propagators:
+    - tracecontext
+    - baggage
+  sampler:
+    type: always_on
+  go:
+    image: ghcr.io/open-telemetry/opentelemetry-go-instrumentation/autoinstrumentation-go:v0.24.0
+    env:
+      - name: OTEL_GO_AUTO_INCLUDE_DB_STATEMENT
+        value: "true"
+      - name: OTEL_GO_AUTO_PARSE_DB_STATEMENT
+        value: "true"
+---
+apiVersion: opentelemetry.io/v1alpha1
+kind: Instrumentation
+metadata:
+  name: config-instrumentation
+  namespace: config
+spec:
+  exporter:
+    endpoint: http://otel-gateway-collector.otel.svc.cluster.local:4318
+  propagators:
+    - tracecontext
+    - baggage
+  sampler:
+    type: always_on
+  go:
+    image: ghcr.io/open-telemetry/opentelemetry-go-instrumentation/autoinstrumentation-go:v0.24.0
+    env:
+      - name: OTEL_GO_AUTO_INCLUDE_DB_STATEMENT
+        value: "true"
+      - name: OTEL_GO_AUTO_PARSE_DB_STATEMENT
+        value: "true"
