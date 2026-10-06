@@ -63,15 +63,15 @@ flowchart LR
 
     subgraph telemetry["Telemetry"]
         gateway["OTel Collector gateway"]
-        graph["service_graph connector"]
+        servicegraph["service_graph connector"]
         tempo["Tempo"]
         prometheus["Prometheus"]
         logs["OTel logs collector"]
         loki["Loki"]
 
         gateway --> tempo
-        gateway --> graph
-        graph --> prometheus
+        gateway --> servicegraph
+        servicegraph --> prometheus
         logs --> loki
     end
 
