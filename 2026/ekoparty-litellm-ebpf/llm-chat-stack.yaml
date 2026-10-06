@@ -1,0 +1,299 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ai
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ui-data
+  namespace: ai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: llm-data
+  namespace: ai
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gw-conf
+  namespace: ai
+data:
+  config.yaml: |
+    model_list:
+      - model_name: qwen
+        litellm_params:
+          model: ollama/qwen2.5:0.5b-instruct
+          api_base: http://llm:11434
+    general_settings:
+      master_key: os.environ/LITELLM_MASTER_KEY
+      store_model_in_db: false
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: gw-auth
+  namespace: ai
+type: Opaque
+stringData:
+  LITELLM_MASTER_KEY: sk-1ac6b3c805d468e3995848274e74710c89a411f81cd119468415b93c236e4f56
+  WEBUI_SECRET_KEY: 5472f1b0afbc5c45f4b5d88755c9406417aec5f43c7eefa6bcb50fd4cd0f5b40
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gw
+  namespace: ai
+spec:
+  type: ClusterIP
+  selector:
+    app: gw
+  ports:
+    - name: http
+      port: 4000
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: llm
+  namespace: ai
+spec:
+  type: ClusterIP
+  selector:
+    app: llm
+  ports:
+    - name: http
+      port: 11434
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ui
+  namespace: ai
+spec:
+  progressDeadlineSeconds: 1800
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: ui
+  template:
+    metadata:
+      labels:
+        app: ui
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: open-webui
+          image: ghcr.io/open-webui/open-webui:v0.11.4@sha256:9591b13f13843c7721c2b8eaf7382846c81b3ffe126526d1888d1fed50c6a33f
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: DEFAULT_LOCALE
+              value: en-US
+            - name: WEBUI_AUTH
+              value: "false"
+            - name: DATABASE_URL
+              value: sqlite:////app/backend/data/webui-noauth.db
+            - name: ENABLE_OPENAI_API
+              value: "true"
+            - name: ENABLE_OPENAI_API_PASSTHROUGH
+              value: "true"
+            - name: ENABLE_OLLAMA_API
+              value: "false"
+            - name: DEFAULT_MODEL_METADATA
+              value: '{"capabilities":{"builtin_tools":false}}'
+            - name: ENABLE_FOLLOW_UP_GENERATION
+              value: "false"
+            - name: ENABLE_TITLE_GENERATION
+              value: "false"
+            - name: OPENAI_API_BASE_URLS
+              value: http://gw:4000
+            - name: OPENAI_API_KEYS
+              valueFrom:
+                secretKeyRef:
+                  name: gw-auth
+                  key: LITELLM_MASTER_KEY
+            - name: WEBUI_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gw-auth
+                  key: WEBUI_SECRET_KEY
+            - name: RAG_EMBEDDING_MODEL_AUTO_UPDATE
+              value: "false"
+          resources:
+            requests:
+              cpu: 100m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 2Gi
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: ui-data
+              mountPath: /app/backend/data
+      volumes:
+        - name: ui-data
+          persistentVolumeClaim:
+            claimName: ui-data
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gw
+  namespace: ai
+spec:
+  progressDeadlineSeconds: 1800
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: gw
+  template:
+    metadata:
+      labels:
+        app: gw
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: litellm
+          image: ghcr.io/berriai/litellm:v1.83.0-nightly@sha256:3a8f981557838dea1340d318ba22225bfc2f2e86e4b415d6b1bc9cbe8dd26b72
+          imagePullPolicy: IfNotPresent
+          args:
+            - --config
+            - /app/config.yaml
+            - --host
+            - 0.0.0.0
+            - --port
+            - "4000"
+            - --num_workers
+            - "1"
+          ports:
+            - name: http
+              containerPort: 4000
+              protocol: TCP
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: gw-auth
+                  key: LITELLM_MASTER_KEY
+          resources:
+            requests:
+              cpu: 250m
+              memory: 1Gi
+            limits:
+              cpu: "1"
+              memory: 1536Mi
+          startupProbe:
+            httpGet:
+              path: /health/liveliness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: gw-conf
+              mountPath: /app/config.yaml
+              subPath: config.yaml
+              readOnly: true
+      volumes:
+        - name: gw-conf
+          configMap:
+            name: gw-conf
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm
+  namespace: ai
+spec:
+  progressDeadlineSeconds: 1800
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: llm
+  template:
+    metadata:
+      labels:
+        app: llm
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: ollama
+          image: ollama/ollama:0.34.4@sha256:8262851b2846b87c649eddf3e76beb270c52f4d1bc94559f47efde16b0841551
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: OLLAMA_HOST
+              value: 0.0.0.0:11434
+          ports:
+            - name: http
+              containerPort: 11434
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "1"
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          startupProbe:
+            httpGet:
+              path: /api/version
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /api/version
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 5
+          volumeMounts:
+            - name: llm-data
+              mountPath: /root/.ollama
+      volumes:
+        - name: llm-data
+          persistentVolumeClaim:
+            claimName: llm-data

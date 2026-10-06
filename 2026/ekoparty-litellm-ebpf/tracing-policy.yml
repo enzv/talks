@@ -1,0 +1,40 @@
+apiVersion: cilium.io/v1alpha1
+kind: TracingPolicyNamespaced
+metadata:
+  name: block-litellm-mcp-rce
+  namespace: ai
+spec:
+  podSelector:
+    matchLabels:
+      app: gw
+  lsmhooks:
+    - hook: bprm_check_security
+      args:
+        - index: 0
+          type: linux_binprm
+      selectors:
+        - matchParentBinaries:
+            - operator: In
+              values:
+                - /usr/bin/litellm
+              followChildren: true
+          matchBinaries:
+            - operator: Prefix
+              values:
+                - /usr/
+                - /bin/
+                - /root/.cache/prisma-python/
+          matchActions:
+            # ENFORCE: - action: Override
+            # ENFORCE:   argError: -1
+            - action: Post
+        # Uncomment to deny every executable in LiteLLM's descendant tree:
+        # - matchParentBinaries:
+        #     - operator: In
+        #       values:
+        #         - /usr/bin/litellm
+        #       followChildren: true
+        #   matchActions:
+        #     - action: Override
+        #       argError: -1 # -EPERM
+        #     - action: Post
